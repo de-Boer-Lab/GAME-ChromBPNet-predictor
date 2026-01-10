@@ -1,0 +1,12 @@
+# Ignore the container since it is huge
+*.sif
+
+# macOS system files
+*.DS_Store
+
+# Python cache files
+__pycache__/
+*.pyc
+
+# .h5 files
+*.h5

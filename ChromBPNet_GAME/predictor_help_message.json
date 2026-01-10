@@ -1,0 +1,14 @@
+{
+  "model": "ChromBPNet",
+  "version": "1.0",
+  "publication" : "Kundaje et. al, 2024",
+  "build_date": "Oct 29, 2025",
+  "features": ["accessibility"],
+  "cell_types" : ["HEPG2", "K562", "H1", "GM12878", "IMR90"],
+  "species": ["homo_sapiens"],
+  "container_authors": ["Ishika Luthra", "Satyam Priyadarshi"],
+  "model_authors": "Anusri Pampari, Anna Shcherbina, Anshul Kundaje",
+  "input_size": 2114,
+  "bin_size": 1,
+  "expression_strand_specific": "false"
+}
