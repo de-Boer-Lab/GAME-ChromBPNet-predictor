@@ -1,0 +1,32 @@
+Bootstrap: docker
+From: kundajelab/chrombpnet:latest
+
+%files
+    ../ChromBPNet_Predictor/ /ChromBPNet_Predictor
+
+%environment
+    export LC_ALL=C
+    export PATH="/opt/conda/envs/chrombpnet/bin:$PATH"
+    export LD_LIBRARY_PATH="/usr/local/cuda/lib64:$LD_LIBRARY_PATH"
+    export LD_LIBRARY_PATH="/opt/conda/envs/chrombpnet/lib:$LD_LIBRARY_PATH"
+
+%post
+    echo "Copying Predictor code..."
+    chmod -R 755 /ChromBPNet_Predictor
+
+    echo "Installing REST API dependencies..."
+    . /opt/conda/etc/profile.d/conda.sh
+    conda activate chrombpnet
+
+    pip install flask waitress
+
+    cd /ChromBPNet_Predictor
+    pip install -e .
+
+%runscript
+    export PATH="/opt/conda/envs/chrombpnet/bin:$PATH"
+    exec python3 /ChromBPNet_Predictor/ChromBPNet_predictor_RestAPI.py "$@"
+
+%startscript
+    export PATH="/opt/conda/envs/chrombpnet/bin:$PATH"
+    exec python3 /ChromBPNet_Predictor/ChromBPNet_predictor_RestAPI.py "$@"
