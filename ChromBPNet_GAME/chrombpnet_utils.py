@@ -4,7 +4,6 @@ import requests
 import tensorflow as tf
 from tensorflow.keras.models import load_model
 import chrombpnet.training.utils.losses as losses
-import chrombpnet.training.utils.one_hot as one_hot
 from tensorflow.keras.utils import get_custom_objects
 from tensorflow.keras.models import load_model
 import os
@@ -48,12 +47,36 @@ def load_all_models(model_path_list):
     model_objects = []
     for model_path in model_path_list:
         full_model_path = f"{Chrombpnet_SCRIPT_DIR}/models/models_nobias/{model_path}"
-
+        if not os.path.exists(full_model_path):
+            raise FileNotFoundError(
+                f"Model file not found: {full_model_path}. "
+                "Ensure all fold .h5 files are present in models/models_nobias/."
+            )
         model_objects.append(load_model_wrapper(full_model_path))
     return model_objects
 
 #Need to predict for 5 folds for each models and take the average
-def predict_across_folds_for_selected_matched_models(one_hot_encoded_seqs, model_objects, is_point_readout, scale_actual):
+def predict_across_folds_for_selected_matched_models(one_hot_encoded_seqs, model_objects, 
+                                                     is_point_readout, scale_actual):
+    
+    """
+    Returns linear-scale predictions averaged across all model folds.
+    
+    Fold averaging depends on the requested scale, consistent with v1 implementation.
+        - linear: arithmetic mean across folds in linear space (i.e. average the final predictions)
+        - log: geometric mean across folds (average in log space, then exp back to linear)
+               This is equivalent to: exp(mean(log(predictions_per_fold)))
+    
+    NOTE: Always returns linear-scale predictions from this function, even if log scale was requested.
+    The scale_actual only controls how fold averaging is done, not the final output scale.
+    Final output scaling (e.g. log transformation) is applied downstream via apply_scaling()
+    in the server loop.
+
+    NOTE: predict_chrombpnet always calls this with is_point_readout=False so
+    that full track predictions are returned. Point readout averaging and
+    prediction_ranges subsetting are applied as post-processing in
+    predict_chrombpnet after the full track predictions are assembled.
+    """
     #load the model
     #Number of sequences x 1000bp x number of models
     num_sequences = one_hot_encoded_seqs.shape[0]
@@ -65,37 +88,49 @@ def predict_across_folds_for_selected_matched_models(one_hot_encoded_seqs, model
     else:
         predictions_matrix = np.empty((num_sequences, seq_len, num_models), dtype=np.float32)
 
-    #If the Evaluator requests linear scale
     if scale_actual == "linear":
         print("making linear scale predictions")
         for idx, model in enumerate(model_objects):
             print(f"predicting on model: {idx}")
             pred_logits_wo_bias, pred_logcts_wo_bias = model.predict(one_hot_encoded_seqs)
+            # ^^^^ logits is the profile vector
+            # logcts is the single value
             if is_point_readout:
                 predictions_matrix[:,:,idx]= np.exp(pred_logcts_wo_bias)
-        
+                # print("NEVER REACHED?") # This code path is never reached because predict_chrombpnet always calls with is_point_readout=False, but we keep it here for completeness in case of future use.
             else:
-                predictions_matrix[:,:,idx]= softmax(pred_logits_wo_bias) * (np.expand_dims(np.exp(pred_logcts_wo_bias)[:,0],axis=1)) # final predcitions you can use
-    #For log scale   
-    if scale_actual == "log":
+                predictions_matrix[:,:,idx]= softmax(pred_logits_wo_bias) \
+                    * (np.expand_dims(np.exp(pred_logcts_wo_bias)[:,0],axis=1)) # final predictions you can use
+                # debug print the shape of predictions_matrix after filling
+                # print(f"Filled predictions for model {idx}, current shape of predictions_matrix: {predictions_matrix.shape}")
+                
+        # Arithmetic mean across folds in linear space is just the average of the predictions
+        predictions_avg = predictions_matrix.mean(axis=2)
+        
+    # For log scale   
+    elif scale_actual == "log":
         print("making log scale predictions")
         for idx, model in enumerate(model_objects):
             print(f"predicting on model: {idx}")
             pred_logits_wo_bias, pred_logcts_wo_bias = model.predict(one_hot_encoded_seqs)
             if is_point_readout:
                 predictions_matrix[:,:,idx]= pred_logcts_wo_bias
+                # print("NEVER REACHED?") # This code path is never reached because predict_chrombpnet always calls with is_point_readout=False, but we keep it here for completeness in case of future use.
             else:
-                predictions_matrix[:,:,idx]= np.log(softmax(pred_logits_wo_bias) * (np.expand_dims(np.exp(pred_logcts_wo_bias)[:,0],axis=1))) # final predcitions you can use
+                predictions_matrix[:,:,idx]= np.log(
+                    softmax(pred_logits_wo_bias) 
+                    * (np.expand_dims(np.exp(pred_logcts_wo_bias)[:,0],axis=1))
+                ) # final predictions you can use
+                # print(f"Filled predictions for model {idx}, current shape of predictions_matrix: {predictions_matrix.shape}")
 
-    # Average across the fold/model axis
-    predictions_avg = predictions_matrix.mean(axis=2)
-    print("Shape of averaged predictions across models and folds:", predictions_avg.shape)  # (num_sequences, 1000)
-    
+        # Average across the fold/model axis in log space (geometric mean in linear space), then exp back to linear
+        predictions_avg = np.exp(predictions_matrix.mean(axis=2))
+    # print("Shape of averaged predictions across models and folds:", predictions_avg.shape)  # (num_sequences, 1000)
     return predictions_avg
 
 def choose_model(cell_type, matcher_ip, matcher_port):
     """
-    This function takes in the requested cell type from the Evaluator and tries to find either an exact match or cloest matched cell type (using Matcher).
+    This function takes in the requested cell type from the Evaluator and tries to find either an exact match or closest matched cell type (using Matcher).
     Args:
         cell_type (str): Requested cell type from Evaluator task
     
@@ -131,7 +166,7 @@ def choose_model(cell_type, matcher_ip, matcher_port):
                 return "Failed to connect to remote Matcher", None, "error"
                 # Parse the JSON response from the server
             matcher_result = response.json()
-            print(f"--- Real response from Ollama via remote API: {matcher_result} ---")
+            print(f"--- Real response from Matcher : {matcher_result} ---")
 
             matcher_version = matcher_result.get('matcher_version', 'UnknownMatcher')
 
@@ -154,7 +189,7 @@ def choose_model(cell_type, matcher_ip, matcher_port):
         except ConnectionError as e:
             print(f"A fatal error occurred while communicating with the Matcher: {e}")
             error_message = f"Internal Server Error: The dependent Matcher service at {matcher_ip}:{matcher_port} is unavailable."
-            # Return a 4-element tuple to match the success signature and avoid crashing the caller
+            # Return a 3-element tuple to match the success signature and avoid crashing the caller
             return error_message, None, "error"
     else:
 
@@ -187,6 +222,15 @@ def pad_sequences(sequences, target_length):
         # simply add adapters to each side.
         elif seq_len == target_length:
             padded_list.append(seq)
+        else:
+            # FIX: sequences longer than target_length were previously silently
+            # dropped from padded_list, causing an index mismatch when predictions
+            # were zipped back to sequence IDs downstream.
+            raise ValueError(
+                f"pad_sequences: sequence of length {seq_len} exceeds target "
+                f"{target_length}. Sequences longer than {target_length}bp must "
+                "be handled by the long-sequence chunking path before padding."
+            )
 
     return padded_list
 
@@ -210,20 +254,19 @@ def slice_predictions(sequences, predictions, target_length):
 
 def slice_predictions_longSeqs(sequence_dict, predictions, target_length, is_point_readout):
     sliced_predictions = []
-    print("SEQDICT")
-    print(sequence_dict)
+
     if is_point_readout == False:
         
         i = 0
         for key, value_list in sequence_dict.items():
             for seq, length in value_list:
-                print(f"Sequence length: {length}")
+                #print(f"Sequence length: {length}")
                 if length < 1000:
                     #Padding was only added downstream so just need to take the length of sequence from predictions
-                    print(len(predictions[i,0:length]))
+                    #print(len(predictions[i,0:length]))
                     sliced_predictions.append(predictions[i,0:length])
                 elif length == target_length:
-                    print("No need to slice predictions")
+                    #print("No need to slice predictions")
                     sliced_predictions.append(predictions[i,:])
                 i+=1
     else:
@@ -245,8 +288,8 @@ def slice_predictions_longSeqs(sequence_dict, predictions, target_length, is_poi
             #Here you are taking the mean of the point count values
             seq_to_squished_predictions[seq_key] = [np.mean(np.concatenate(squished_per_sequence, axis=0))]
         else:
-            print("FINAL length")
-            print(len(np.concatenate(squished_per_sequence, axis=0)))
+            #print("FINAL length")
+            #print(len(np.concatenate(squished_per_sequence, axis=0)))
             seq_to_squished_predictions[seq_key] = np.concatenate(squished_per_sequence, axis=0)
 
     return seq_to_squished_predictions

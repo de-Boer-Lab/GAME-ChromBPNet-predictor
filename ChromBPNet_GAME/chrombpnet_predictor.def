@@ -1,0 +1,68 @@
+Bootstrap: docker
+From: kundajelab/chrombpnet:latest
+
+%files
+    ./ChromBPNet_predictor_RestAPI.py /ChromBPNet_GAME/ChromBPNet_predictor_RestAPI.py
+    ./chrombpnet_predict.py /ChromBPNet_GAME/chrombpnet_predict.py
+    ./chrombpnet_utils.py /ChromBPNet_GAME/chrombpnet_utils.py
+    ./config.py /ChromBPNet_GAME/config.py
+    ./error_checking_functions.py /ChromBPNet_GAME/error_checking_functions.py
+    ./model_validation.py /ChromBPNet_GAME/model_validation.py
+    ./predictor_content_handler.py /ChromBPNet_GAME/predictor_content_handler.py
+    ./predictor_help_message.json /ChromBPNet_GAME/predictor_help_message.json
+    ./schema_validation.py /ChromBPNet_GAME/schema_validation.py
+    ./setup.py  /ChromBPNet_GAME/setup.py
+    ./chrombpnet /ChromBPNet_GAME/chrombpnet
+    ./models /ChromBPNet_GAME/models
+    ./requirements.txt /ChromBPNet_GAME/requirements.txt
+
+%environment
+    export LC_ALL=C
+	export PATH="/usr/local/bin:$PATH"
+
+%post
+    echo "Copying Predictor code..."
+    chmod -R 755 /ChromBPNet_GAME
+
+    cd /ChromBPNet_GAME
+    pip install --no-cache-dir -e .
+
+    echo "Installing REST API dependencies..."
+    # Use system python in the base image
+    pip install --no-cache-dir flask waitress
+
+%runscript
+    exec python3 /ChromBPNet_GAME/ChromBPNet_predictor_RestAPI.py "$@"
+
+%startscript
+    exec python3 /ChromBPNet_GAME/ChromBPNet_predictor_RestAPI.py "$@"
+
+%labels
+    Author "Ishika Luthra, Satyam Priyadarshi"
+    game_schema_version "1.0"
+    Description "A RESTful ChromBPNet Predictor for the Genomic API for Model Evaluation (GAME) Framework"
+
+%help
+    This container for Predictor includes:
+    - A Flask-based REST API (`ChromBPNet_predictor_RestAPI.py`).
+    - Integrated ChromBPNet model (Pampari et al. (2025), Kundaje Lab) installed as an editable package from the bundled `chrombpnet/` source.
+    - Pre-trained no-bias model weights (`models/models_nobias/*.h5`) for HEPG2, K562, H1, GM12878, and IMR90 — 5 folds per cell type.
+    - Cell-type to model mapping table (`models/model_mappings.txt`).
+    - Predictor support scripts:
+        - `chrombpnet_predict.py` — prediction wrapper handling long-sequence chunking, fold averaging, and range/readout post-processing.
+        - `chrombpnet_utils.py` — model loading, sequence padding/slicing, and Matcher communication.
+        - `config.py` — container-aware Predictor versioning derived from the Apptainer build timestamp.
+        - `schema_validation.py`, `model_validation.py`, `error_checking_functions.py` — request validation and standardized error handling.
+        - `predictor_content_handler.py` — JSON / MessagePack content negotiation.
+        - `predictor_help_message.json` — Predictor metadata served via `/help`.
+
+    Run the container:
+    ```
+    apptainer run --nv --containall chrombpnet_gpu.sif 172.xx.xx.xxx 5000 172.xx.xx.xxx 5001
+    ```
+
+    Arguments:
+    1. `HOST`:         IP address or hostname for the Predictor to bind to.
+    2. `PORT`:         Port number the Predictor listens on.
+    3. `MATCHER_IP`:   IP address of the running Matcher service.
+    4. `MATCHER_PORT`: Port number of the running Matcher service.
