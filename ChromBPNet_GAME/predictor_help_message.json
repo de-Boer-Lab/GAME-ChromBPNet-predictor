@@ -1,14 +1,16 @@
 {
   "model": "ChromBPNet",
-  "version": "1.0",
-  "publication" : "Kundaje et. al, 2024",
-  "build_date": "Oct 29, 2025",
+  "game_schema_version": "1.0",
+  "publication" : "Pampari et. al, 2025 (preprint)",
   "features": ["accessibility"],
   "cell_types" : ["HEPG2", "K562", "H1", "GM12878", "IMR90"],
   "species": ["homo_sapiens"],
   "container_authors": ["Ishika Luthra", "Satyam Priyadarshi"],
-  "model_authors": "Anusri Pampari, Anna Shcherbina, Anshul Kundaje",
+  "model_authors": ["Anusri Pampari", "Anna Shcherbina", "Evgeny Z. Kvon", "Michael Kosicki",
+  "Surag Nair", "Soumya Kundu", "Arwa S. Kathiria", "Viviana I. Risca",
+  "Kristiina Kuningas", "Kaur Alasoo", "William James Greenleaf",
+  "Len A. Pennacchio", "Anshul Kundaje"],
   "input_size": 2114,
   "bin_size": 1,
-  "expression_strand_specific": "false"
+  "expression_strand_specific": false
 }

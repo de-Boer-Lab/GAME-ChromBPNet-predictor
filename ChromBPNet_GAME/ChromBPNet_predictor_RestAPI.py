@@ -1,36 +1,49 @@
 '''RESTful Test Evaluator Utilizing Flask'''
-import os
-import sys
 import json
+import math
+import argparse
 from flask import Flask
 
+from config import PREDICTOR_NAME, HELP_FILE, SUPPORTED_REQUEST_FORMATS, SUPPORTED_RESPONSE_FORMATS
 from error_checking_functions import *
 from schema_validation import *
 from chrombpnet_predict import *
 from predictor_content_handler import decode_request, encode_response
 from model_validation import *
 from chrombpnet_utils import *
-# Get the absolute path of the script's directory
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Hardcode name of this Predictor. It will be added to ALL responses.
-PREDICTOR_NAME = "ChromBPNet"
+# --- Have arguments be defined globally ---
+parser = argparse.ArgumentParser(description=f'{PREDICTOR_NAME} Predictor API')
+parser.add_argument('ip', type=str, help='IP address to bind')
+parser.add_argument('port', type=int, help='Port to bind')
+parser.add_argument('matcher_ip', type=str, help='Matcher Service IP')
+parser.add_argument('matcher_port', type=int, help='Matcher Service Port')
 
-# Determine if running inside a container or not
-if os.path.exists('/.singularity.d'):
-    # Running inside the container
-    print("Running inside the container...🥡")
-    HELP_FILE = "/predictor_help_message.json"
-else:
-    # Running outside the container
-    print("Running outside the container...📋")
-    PREDICTOR_CONTAINER_DIR = os.path.dirname(SCRIPT_DIR)
-    HELP_FILE = os.path.join(SCRIPT_DIR, 'predictor_help_message.json')
+args = parser.parse_args()
 
+predictor_ip = args.ip
+predictor_port = args.port
+matcher_ip = args.matcher_ip
+matcher_port = args.matcher_port
 
-# ------ Configuration for Wire-Format ------
-SUPPORTED_REQUEST_FORMATS = [fmt.lower() for fmt in ["application/json", "application/msgpack"]]
-SUPPORTED_RESPONSE_FORMATS = [fmt.lower() for fmt in ["application/json", "application/msgpack"]] # JSON is always supported even when not mentioned. This is jsut to show that. 
+print(f"Matcher service configured at: {matcher_ip}:{matcher_port}")
+
+# ----------- Sanitization -----------
+# Clips non-finite floats (NaN, Inf) before JSON serialization.
+# Important for log-scale predictions where log(0) -> -inf.
+MAX_VALUE = 1e5
+MIN_VALUE = -1e5
+
+def _sanitize_for_json(obj):
+    if isinstance(obj, dict):
+        return {k: _sanitize_for_json(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_sanitize_for_json(v) for v in obj]
+    elif isinstance(obj, float):
+        if math.isinf(obj) or math.isnan(obj):
+            return MAX_VALUE if obj > 0 else MIN_VALUE
+        return obj
+    return obj
 
 # --- Flask App and Central Error Handler ---
 app = Flask(__name__)
@@ -40,7 +53,7 @@ app.json.sort_keys = False
 
 def create_error_response(error_key, messages, status_code):
     """ 
-    Formats error response into a standarized JSON structure.
+    Formats error response into a standardized JSON structure.
     
     Args:
         error_key (str): The category of the error (e.g. 'bad_prediction_request', 'prediction_request_failed').
@@ -126,23 +139,25 @@ def predict():
 
         # Preprocess the data using the imported function
         sequences = preprocess_data(evaluator_request)
-        readout_type = evaluator_request.get('readout')
+       
+        prediction_ranges = evaluator_request.get('prediction_ranges', {})
         
         # ---------------------- Extract Prediction Tasks and Run the Model ----------------------
         # Start big loop here for all the prediction_tasks
         # First step is to collect all unique tasks
-        request_tasks = set()  # Store unique (request_type, cell_type) pairs
+        request_tasks = set()  # Store unique (request_type, cell_type, scale_requested) tuples
         for prediction_task in evaluator_request['prediction_tasks']:
             request_type = prediction_task['type']
             cell_type = prediction_task['cell_type']
             scale_requested = prediction_task.get("scale", None)
-
             request_tasks.add((request_type, cell_type, scale_requested))
 
         print(f"Unique tasks extracted: {request_tasks}")
         # Then run ChromBPNet Model ONCE for all required tracks
         print("Running ChromBPNet model on collected tasks...")
-        task_predictions, matcher_version, scale_actual = predict_chrombpnet(sequences, request_tasks, matcher_ip, matcher_port, is_point_readout)
+        task_predictions, matcher_version = predict_chrombpnet(sequences, request_tasks, matcher_ip,
+                                                               matcher_port, prediction_ranges,
+                                                               is_point_readout)
         
         model_errors = {'prediction_request_failed': []}
         if isinstance(task_predictions, str):
@@ -167,12 +182,15 @@ def predict():
 
         # Loop through all the prediction tasks
         for prediction_task in evaluator_request['prediction_tasks']:
-            task_name = prediction_task['name']
             request_type = prediction_task['type']
             cell_type = prediction_task['cell_type']
+            requested_scale = prediction_task.get('scale', None)
 
-            # Retrieve the predictions for this task
-            task_key = (request_type, cell_type)
+            # 3-tuple lookup must match the key used in predict_chrombpnet
+            # scale_actual resolves None -> "linear" inside predict_chrombpnet,
+            # so we resolve the same way here for the lookup
+            scale_actual_for_lookup = requested_scale if requested_scale is not None else "linear"
+            task_key = (request_type, cell_type, scale_actual_for_lookup)
             task_result = task_predictions[task_key]
            
             predictions = {
@@ -186,35 +204,42 @@ def predict():
                 current_prediction_task = {
                     'name': prediction_task['name'],
                     'type_requested': request_type,
-                    'type_actual': "N/A",  # If remapped, update this
+                    'type_actual': "N/A",
                     'cell_type_requested': cell_type,
-                    'cell_type_actual': "N/A",  # If remapped, update this
+                    'cell_type_actual': "N/A",
                     'species_requested': prediction_task['species'],
                     'species_actual': prediction_task['species'],
-                    'scale_prediction_requested': prediction_task.get('scale', None), 
+                    'scale_prediction_requested': requested_scale, 
                     'scale_prediction_actual': "N/A",
                     'predictions': predictions
                     
                 }
             else:
+                
+                # NOTE: sanitize before scaling -- clamps any NaN/Inf to finite values.
+                # A second pass may be needed if log scale produces -inf from log(0),
+                # which is handled by the epsilon clip in apply_scaling().
+                predictions = _sanitize_for_json(predictions)
+                
+                predictions_scaled, effective_scale = apply_scaling(predictions, requested_scale)
 
                 current_prediction_task = {
                     'name': prediction_task['name'],
                     'type_requested': request_type,
-                    'type_actual': task_result['type_actual'],  # If remapped, update this
+                    'type_actual': task_result['type_actual'],
                     'cell_type_requested': cell_type,
-                    'cell_type_actual': task_result['cell_type_actual'],  # If remapped, update this
+                    'cell_type_actual': task_result['cell_type_actual'],
                     'species_requested': prediction_task['species'],
                     'species_actual': prediction_task['species'],
-                    'scale_prediction_requested': prediction_task.get('scale', None),
-                    'scale_prediction_actual': scale_actual,
+                    'scale_prediction_requested': requested_scale,
+                    'scale_prediction_actual': effective_scale,
                 }
 
                 # Only add aggregation if there are multiple types
                 if len(task_result['type_actual']) > 1:
                     current_prediction_task['aggregation'] = {"models": "mean"}
 
-                current_prediction_task['predictions'] = predictions
+                current_prediction_task['predictions'] = predictions_scaled
             
             # Append results for current prediction task to the main JSON object
             json_return['prediction_tasks'].append(current_prediction_task)
@@ -237,12 +262,5 @@ def predict():
 
 
 if __name__ == "__main__":
-    # if len(sys.argv) != 5:
-    #     print(f"Invalid arguments! Arguments must have: <container image/python script> <ip_address> <port> <matcher_ip_address> <matcher_port>")
-    #     sys.exit(1)
-        
-    predictor_ip = sys.argv[1]
-    predictor_port = int(sys.argv[2])
-    matcher_ip = sys.argv[3]
-    matcher_port = sys.argv[4]
+    print(f"{PREDICTOR_NAME} Predictor is starting up/ running  on http://{predictor_ip}:{predictor_port}")
     app.run(host=predictor_ip, port=predictor_port)
