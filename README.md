@@ -4,6 +4,13 @@ A RESTful ChromBPNet Predictor for the **Genomic API for Model Evaluation (GAME)
 
 The underlying model is ChromBPNet (Pampari et al., 2025, Kundaje Lab). This container ships the **no-bias** model heads only — the Tn5/DNase bias model has already been factored out, so predictions reflect sequence-driven accessibility directly. The ChromBPNet Predictor encapsulates 9 individual chromatin accessibility models (5 folds for each model, some trained with ATAC-seq data and others with DNase) across five cell types.
 
+## Important Links
+
+- To learn more about the GAME Framework ([Main GAME Repository](https://github.com/de-Boer-Lab/Genomic-API-for-Model-Evaluation), [preprint](https://www.biorxiv.org/content/10.1101/2025.07.04.663250v1.full))
+- GAME Documentation: [ReadTheDocs](https://genomic-api-for-model-evaluation-documentation.readthedocs.io)
+- Pre-built ChromBPNet container image: [Hugging Face](https://huggingface.co/datasets/deBoerLab/ChromBPNet_Predictor_GAME)
+- To learn more about ChromBPNet: [ChromBPNet GitHub Repository](https://github.com/kundajelab/chrombpnet)
+
 ---
 
 ## Repository layout
