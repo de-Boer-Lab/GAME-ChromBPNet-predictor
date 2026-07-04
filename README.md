@@ -10,6 +10,7 @@ The underlying model is ChromBPNet (Pampari et al., 2025, Kundaje Lab). This con
 - GAME Documentation: [ReadTheDocs](https://genomic-api-for-model-evaluation-documentation.readthedocs.io)
 - Pre-built ChromBPNet container image: [Hugging Face](https://huggingface.co/datasets/deBoerLab/ChromBPNet_Predictor_GAME)
 - To learn more about ChromBPNet: [ChromBPNet GitHub Repository](https://github.com/kundajelab/chrombpnet)
+- List of all [GAME Modules](https://github.com/de-Boer-Lab/GAME_modules)
 
 ---
 
