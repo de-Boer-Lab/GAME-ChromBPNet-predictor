@@ -4,13 +4,13 @@ import requests
 import tensorflow as tf
 from tensorflow.keras.models import load_model
 import chrombpnet.training.utils.losses as losses
+from error_checking_functions import UpstreamDependencyError, ServerError
 from tensorflow.keras.utils import get_custom_objects
 from tensorflow.keras.models import load_model
 import os
 import sys
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 tf.get_logger().setLevel('ERROR')
-MATCHER_NULL_RESPONSE = "NULL"
 
 
 Chrombpnet_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -138,7 +138,7 @@ def choose_model(cell_type, matcher_ip, matcher_port):
         tuple: A tuple containing:
             - Either the rows that map to the cell type that should be used or the request error msg
             - The mapped cell type (cell_type_actual)
-            - Matcher versions (if used) otherwise N/A
+            - Matcher versions (if used) otherwise None
     """
     request_error_msg = f"Request Error: No match found for: {cell_type}."
     #Read in a .txt file that has the cell type mappings for the models that are included in this container
@@ -152,7 +152,7 @@ def choose_model(cell_type, matcher_ip, matcher_port):
     if model_picked.empty:
         try:
             print(f"No exact matching cell types for: {cell_type}. Querying Matcher for similar cell types")
-
+            matcher_version = "error"
             matcher_url = f"http://{matcher_ip}:{matcher_port}"
             message_for_Matcher = {
                 'cell_type_requested': cell_type,
@@ -161,9 +161,19 @@ def choose_model(cell_type, matcher_ip, matcher_port):
             try:
                 response = requests.post(f"{matcher_url}/match", json=message_for_Matcher) #, timeout=60)
                 response.raise_for_status()
+
+            except requests.exceptions.HTTPError as e:
+                status = e.response.status_code
+                body = e.response.text[:500]
+                if status >= 500:
+                    raise UpstreamDependencyError(
+                        f"Matcher at {matcher_ip}:{matcher_port} returned HTTP {status}: {body}")
+                raise ServerError(
+                    f"Matcher rejected the request with HTTP {status}: {body}")
+
             except requests.exceptions.RequestException as e:
-                print(f"Failed to connect to the remote API at {matcher_url}. Is it running? Error: {e}")
-                return "Failed to connect to remote Matcher", None, "error"
+                raise UpstreamDependencyError(
+                    f"Could not reach the Matcher at {matcher_ip}:{matcher_port}: {e}")
                 # Parse the JSON response from the server
             matcher_result = response.json()
             print(f"--- Real response from Matcher : {matcher_result} ---")
@@ -172,7 +182,7 @@ def choose_model(cell_type, matcher_ip, matcher_port):
 
             # matcher could not find any closely related cell_types
             # NOTE: adding more error checks and using .get(), which will return NoneType if missing, which is seemingly safer for type errors
-            if not matcher_result or not matcher_result.get('cell_type_actual') or matcher_result.get('cell_type_actual') == MATCHER_NULL_RESPONSE:
+            if not matcher_result or not matcher_result.get('cell_type_actual'):
                 print("No similar cell types were found using Matcher")
                 return request_error_msg, None, matcher_version
             else:
@@ -186,14 +196,15 @@ def choose_model(cell_type, matcher_ip, matcher_port):
                     return request_error_msg, None, matcher_version
                 else:
                     return model_picked, matched_cell_type, matcher_version
-        except ConnectionError as e:
-            print(f"A fatal error occurred while communicating with the Matcher: {e}")
-            error_message = f"Internal Server Error: The dependent Matcher service at {matcher_ip}:{matcher_port} is unavailable."
-            # Return a 3-element tuple to match the success signature and avoid crashing the caller
-            return error_message, None, "error"
+
+
+        except (ValueError, KeyError, AttributeError) as e:
+            print(f"Unexpected response from the Matcher: {e}")
+            error_message = f"Unexpected response from the Matcher at {matcher_ip}:{matcher_port}: {e}"
+            return error_message, None, matcher_version
     else:
 
-        return model_picked, cell_type, "N/A"
+        return model_picked, cell_type, None
 
 def pad_sequences(sequences, target_length):
     """

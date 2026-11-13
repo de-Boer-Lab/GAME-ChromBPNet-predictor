@@ -23,15 +23,18 @@ def predict_chrombpnet(sequence_dict, request_tasks, matcher_ip, matcher_port,
         dim(predictions) = len(sequence)
 
     prediction_ranges and readout are applied after assembly:
-        - track + range: return predictions[start:end+1] of profile head
-        - point + range: return mean(predictions[start:end+1]) of profile head
+        - track + range: return predictions[start:end] of profile head
+        - point + range: return mean(predictions[start:end]) of profile head
         - track, no range: return full predictions of profile head
         - point, no range: return mean(full predictions) of profile head
-                   (profile is already count-weighted: softmax(logits) * exp(logcounts),
-                    so mean(profile) = exp(logcounts) / window_size), 
-                    where window_size is 1000 for sequences >=1kb and the
-                    actual sequence length for sequences <1kb.
-    
+                
+        NOTE on point readout: the counts head is never used point values
+        are always a mean over the profile head. The profile is
+        count-weighted by construction (softmax(logits) * exp(logcounts)). When ranges
+        are used the mean is taken over the ranges.
+
+       
+        
     Fold averaging:
         - linear scale: arithmetic mean across folds in linear space
         - log scale: geometric mean across folds (average in log space, exp back to linear)
@@ -53,7 +56,7 @@ def predict_chrombpnet(sequence_dict, request_tasks, matcher_ip, matcher_port,
                task_predictions is keyed by (request_type, cell_type, scale_actual) 3-tuples.
                scale_actual is applied per-task in the server loop via apply_scaling().
     """
-    overall_matcher_version = "N/A"
+    overall_matcher_version = None
     task_predictions = {}
     if prediction_ranges is None:
         prediction_ranges = {}
@@ -77,17 +80,21 @@ def predict_chrombpnet(sequence_dict, request_tasks, matcher_ip, matcher_port,
         print(f"Making predictions for:{task_key}")
         #Choose the best model for the request
         models_chosen, cell_type_actual, matcher_version = choose_model(cell_type, matcher_ip, matcher_port)
-        if matcher_version not in ["N/A", "error"]:
+        if matcher_version not in [None, "error"]:
             overall_matcher_version = matcher_version
+
 
         if cell_type_actual == None:
             print(f"No matching tracks found for {request_type} and {cell_type}. Skipping...")
-            task_predictions[task_key] = {"error": models_chosen}
+            # A Matcher failure and a genuine no-match are different conditions: choose_model
+            # returns "error" as the version only when the Matcher itself failed.
+            error_key = "upstream_dependency_failed" if matcher_version == "error" else "prediction_request_failed"
+            task_predictions[task_key] = {"error": [{error_key: models_chosen}]}
             continue
        
         task_predictions[task_key] = {
             "cell_type_actual": cell_type_actual,
-            "type_actual": models_chosen['Assay'].to_list()
+            "type_actual": [a.lower() for a in models_chosen['Assay'].to_list()]
         }
 
         #Set up the model names for each of the 5 folds
@@ -227,7 +234,7 @@ def predict_chrombpnet(sequence_dict, request_tasks, matcher_ip, matcher_port,
             if seq_range:
                 # Range provided -- crop first, then apply readout
                 start, end = seq_range
-                cropped = raw_pred[start:end + 1]  # end is inclusive per API spec
+                cropped = raw_pred[start:end]  # end is exclusive per API spec
                 if is_point_readout:
                     task_predictions[task_key][seq_id] = float(np.mean(cropped))
                 else:

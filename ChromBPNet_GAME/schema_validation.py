@@ -84,9 +84,9 @@ def preprocess_data(payload):
         for seq_id, pr in payload['prediction_ranges'].items():
             if pr: # Only process non-empty ranges
                 start, end = pr
-
-                if start >= len(sequences[seq_id]) or end >= len(sequences[seq_id]):
-                    err_msg = f"Invalid range for '{seq_id}': index is out of bounds. The maximum valid index for a sequence of length {len(sequences[seq_id])} is {len(sequences[seq_id]) - 1}."
+                seq_len = len(sequences[seq_id])
+                if start >= seq_len or end > seq_len:
+                    err_msg = f"Invalid range for '{seq_id}': index is out of bounds. For a sequence of length {seq_len}, start must be < {seq_len} and end must be <= {seq_len}."
                     errors['prediction_request_failed'].append(err_msg)
 
     if any(errors.values()):

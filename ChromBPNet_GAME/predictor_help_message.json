@@ -2,7 +2,7 @@
   "model": "ChromBPNet",
   "game_schema_version": "1.0",
   "publication" : "Pampari et. al, 2025 (preprint)",
-  "features": ["accessibility"],
+  "features": ["accessibility", "accessibility", "accessibility", "accessibility", "accessibility"],
   "cell_types" : ["HEPG2", "K562", "H1", "GM12878", "IMR90"],
   "species": ["homo_sapiens"],
   "container_authors": ["Ishika Luthra", "Satyam Priyadarshi"],
@@ -10,7 +10,6 @@
   "Surag Nair", "Soumya Kundu", "Arwa S. Kathiria", "Viviana I. Risca",
   "Kristiina Kuningas", "Kaur Alasoo", "William James Greenleaf",
   "Len A. Pennacchio", "Anshul Kundaje"],
-  "input_size": 2114,
   "bin_size": 1,
-  "expression_strand_specific": false
+  "input_size": 2114
 }

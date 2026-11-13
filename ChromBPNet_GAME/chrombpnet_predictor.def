@@ -58,7 +58,7 @@ From: kundajelab/chrombpnet:latest
 
     Run the container:
     ```
-    apptainer run --nv --containall chrombpnet_gpu.sif 172.xx.xx.xxx 5000 172.xx.xx.xxx 5001
+    apptainer run --nv --containall chrombpnet_predictor.sif 172.xx.xx.xxx 5000 172.xx.xx.xxx 5001
     ```
 
     Arguments:

@@ -38,6 +38,13 @@ class ServerError(APIError):
     def __init__(self, message="An unexpected issue occurred on the server."):
         super().__init__(message, status_code=500, error_key='server_error')
 
+class UpstreamDependencyError(APIError):
+    """
+    Exception raised when a required external service (like the Matcher) fails.
+    Corresponds to the 'upstream_dependency_failed' key.
+    """
+    def __init__(self, message="The dependent Matcher service failed."):
+        super().__init__(message, status_code=502, error_key='upstream_dependency_failed')
 # ------------------------
 
 # ERROR CHECKING FUNCTIONS
@@ -222,7 +229,7 @@ def check_prediction_task_scale(prediction_tasks, json_return_error):
 def check_prediction_ranges(prediction_ranges, json_return_error):
     """
     Checks that prediction_ranges are formatted correctly.
-    Now includes checks for positive integers and start <= end.
+    Includes checks for non-negative integers and start < end.
     """
     for key, value in prediction_ranges.items():
         
@@ -245,11 +252,11 @@ def check_prediction_ranges(prediction_ranges, json_return_error):
         end = value[1]
         
         if start < 0 or end < 0:
-            json_return_error['bad_prediction_request'].append(f"Invalid range for '{key}' in 'prediction_ranges': indices must be positive. Received [{start}, {end}]")
+            json_return_error['bad_prediction_request'].append(f"Invalid range for '{key}' in 'prediction_ranges': indices must be non-negative. Received [{start}, {end}]")
             
-        if start > end:
-            json_return_error['bad_prediction_request'].append(f"Invalid range for '{key}' in 'prediction_ranges': start index ({start}) cannot be greater than end index ({end}). Received [{start}, {end}]")
-    
+        if start >= end:
+            json_return_error['bad_prediction_request'].append(f"Invalid range for '{key}' in 'prediction_ranges': start index ({start}) must be less than end index ({end}). Received [{start}, {end}]")
+
     return json_return_error
 
 #check that keys in sequences match those in prediction ranges

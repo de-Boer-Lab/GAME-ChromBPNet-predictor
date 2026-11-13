@@ -174,11 +174,15 @@ def predict():
         # Now format predictions to API JSON structure
         # Create JSON to return
         json_return = {
-            'matcher_version': matcher_version,
             'bin_size': 1,
             # Prediction task is an array of objects for all requested tasks
             'prediction_tasks': []
         }
+        # matcher_version is only returned if a Matcher was used. If the Matcher was used but
+        # did not return a version ("UnknownMatcher" placeholder in chrombpnet_utils.py), it is null.
+        if matcher_version is not None:
+            json_return = {'matcher_version': None if matcher_version == "UnknownMatcher" else matcher_version,
+                           **json_return}
 
         # Loop through all the prediction tasks
         for prediction_task in evaluator_request['prediction_tasks']:
@@ -204,13 +208,13 @@ def predict():
                 current_prediction_task = {
                     'name': prediction_task['name'],
                     'type_requested': request_type,
-                    'type_actual': "N/A",
+                    'type_actual': None,
                     'cell_type_requested': cell_type,
-                    'cell_type_actual': "N/A",
+                    'cell_type_actual': None,
                     'species_requested': prediction_task['species'],
-                    'species_actual': prediction_task['species'],
+                    'species_actual': None,
                     'scale_prediction_requested': requested_scale, 
-                    'scale_prediction_actual': "N/A",
+                    'scale_prediction_actual': None,
                     'predictions': predictions
                     
                 }
@@ -235,9 +239,16 @@ def predict():
                     'scale_prediction_actual': effective_scale,
                 }
 
-                # Only add aggregation if there are multiple types
+                aggregation = {}
+                # Point readouts are a mean over the bp-level profile
+                if is_point_readout:
+                    aggregation["bins"] = "mean"
+                # Averaged across the 2 assays (DNASE + ATAC) when the cell type has both
                 if len(task_result['type_actual']) > 1:
-                    current_prediction_task['aggregation'] = {"models": "mean"}
+                    aggregation["tracks"] = "mean"
+                # Always averaged across the 5 fold models
+                aggregation["models"] = "mean"
+                current_prediction_task['aggregation'] = aggregation
 
                 current_prediction_task['predictions'] = predictions_scaled
             
