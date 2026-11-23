@@ -78,23 +78,27 @@ Five folds are averaged per model, and *how* they are averaged depends on the re
 
 ### 3. Cross-assay pooling
 
-`choose_model` returns *all* mapping rows for a cell line. For every cell line that has both an ATAC and a DNASE model (all except H1), both fold sets — 10 fold-models — are loaded and averaged together into a single mean track. The task result then carries `type_actual: ["DNASE", "ATAC"]`, and the server adds `aggregation: {"models": "mean"}` whenever `type_actual` has more than one entry. H1 (DNASE only) yields a 5-fold mean and no aggregation field.
+`choose_model` returns *all* mapping rows for a cell line. For every cell line that has both an ATAC and a DNASE model (all except H1), both fold sets — 10 fold-models — are loaded and averaged together into a single mean track. Assay names are lowercased, so the task result carries `type_actual: ["dnase", "atac"]` (H1: `["dnase"]`, a 5-fold mean).
+
+The server always attaches an `aggregation` object: `models: "mean"` (fold averaging) on every successful task, plus `tracks: "mean"` when `type_actual` has more than one entry, and `bins: "mean"` for point readouts.
 
 ## Matcher-aware model selection (`choose_model`)
 
 ```
 requested cell_type
    │
-   ├─ exact match in model_mappings.txt?  ──► use those rows   (matcher_version = "N/A")
+   ├─ exact match in model_mappings.txt?  ──► use those rows   (matcher_version = None → omitted from response)
    │
    └─ no ─► POST {cell_type_requested, cell_type_list} to  http://<matcher_ip>:<matcher_port>/match
               │
-              ├─ cell_type_actual returned ─► look up rows for it ─► use them
-              ├─ NULL / empty               ─► request error (no usable match)
-              └─ connection failure         ─► structured error, request does not crash
+              ├─ hosted cell_type_actual returned ─► look up rows for it ─► use them
+              ├─ empty / not a hosted cell line   ─► task fails: prediction_request_failed
+              ├─ response can't be parsed         ─► task fails: upstream_dependency_failed
+              ├─ unreachable / HTTP 5xx           ─► whole request fails: 502 upstream_dependency_failed
+              └─ HTTP 4xx                         ─► whole request fails: 500 server_error
 ```
 
-The return signature is a 3-tuple `(models_or_error_msg, cell_type_actual_or_None, matcher_version)`. A `None` in the second slot signals the caller to record an error for that task and skip it, while still returning a valid response for the other tasks.
+The return signature is a 3-tuple `(models_or_error_msg, cell_type_actual_or_None, matcher_version)`. A `None` in the second slot signals the caller to record a failed task (all `*_actual` fields `null`, error inside `predictions`) and skip it, while still returning a valid response for the other tasks. The third slot is `None` (exact match, no Matcher used), the Matcher's reported version (`"UnknownMatcher"` if it reported none, sent as `null`), or `"error"` (Matcher response could not be parsed, which maps the task error to `upstream_dependency_failed`).
 
 ## Prediction ranges
 
@@ -104,13 +108,13 @@ Ranges are applied **after** the full track is assembled, per sequence:
 seq_range = prediction_ranges.get(seq_id, [])
 if seq_range:
     start, end = seq_range
-    cropped = raw_pred[start:end + 1]      # end is INCLUSIVE, per the API spec
+    cropped = raw_pred[start:end]          # half-open [start, end), per the API spec
     result  = mean(cropped) if point else cropped
 else:
     result  = mean(raw_pred) if point else raw_pred   # full sequence
 ```
 
-- `end` is **inclusive** (`[start, end]`), so the slice is `start:end+1`.
+- Ranges are 0-based and **half-open** (`[start, end)`): `start` is included, `end` is not, so the slice is `start:end` and a track readout returns `end - start` values.
 - An absent or empty range means "use the whole sequence."
 - Point readout takes the mean of whatever range survived (cropped window or full track).
 - Range *validation* (bounds, ordering, types) happens earlier in validation — the inference core only *applies* already-validated ranges.
@@ -139,7 +143,7 @@ Downstream padding (rather than centered padding) is used on trailing chunks so 
 
 ## Output sanitization
 
-Before serialization the server clamps non-finite floats (`NaN`, `±Inf`) to `±1e5` (`_sanitize_for_json`), and `apply_scaling`'s log branch clips to a small positive epsilon (`1e-10`) before `log` to avoid `log(0) = -inf`. These guard the log-scale path, where zero-signal bases would otherwise serialize as infinities.
+For each successful task, the server first runs `_sanitize_for_json` on the linear predictions, *before* `apply_scaling`: `+Inf` becomes `1e5`, and `-Inf` and `NaN` become `-1e5` (`NaN > 0` is false, so NaN falls into the negative branch). `apply_scaling`'s log branch then clips to a small positive epsilon (`1e-10`) before `log`, so zero-signal bases give `log(1e-10) ≈ -23.0` instead of `-inf`. No further check runs after scaling.
 
 ---
 
@@ -152,10 +156,13 @@ All custom errors subclass `APIError`, so a single Flask error handler catches t
 | Class | Status | `error_key` | Use |
 |-------|:------:|-------------|-----|
 | `BadRequestError` | 400 | `bad_prediction_request` | Malformed or schema-invalid request (missing keys, bad types, bad ranges) |
-| `PredictionFailedError` | 422 | `prediction_request_failed` | Request well-formed but unfulfillable (unsupported species/type/readout, invalid bases, no model match) |
-| `ServerError` | 500 | `server_error` | Unexpected backend failure |
+| `PredictionFailedError` | 422 | `prediction_request_failed` | Request well-formed but unfulfillable (unsupported species/type/readout, invalid bases, out-of-bounds ranges) |
+| `ServerError` | 500 | `server_error` | Unexpected backend failure, or the Matcher rejected the predictor's request (HTTP 4xx) |
+| `UpstreamDependencyError` | 502 | `upstream_dependency_failed` | The Matcher is unreachable or returned HTTP 5xx |
 
 Errors are **always serialized as JSON**, even when the client requested MessagePack.
+
+**Task-level failures.** A cell type with no usable model match does not fail the request. That task alone is returned with all `*_actual` fields `null` and `"predictions": {"error": [{"prediction_request_failed": "..."}]}` (or `upstream_dependency_failed` if the Matcher's response could not be parsed); the response is still HTTP 200 and other tasks are returned normally. If every task fails this way, the response is still HTTP 200 with every task marked as failed.
 
 ## Generic schema validation (`validate_request_payload`)
 
@@ -168,7 +175,7 @@ Checks are ordered so later checks can assume earlier structure exists. Missing-
    - `name`, `cell_type`, `species` — single strings.
    - `type` — single string; accepted if `accessibility`/`expression` or starts with `binding_`, `expression_`, `conformation_`.
    - `scale` (optional) ∈ `{linear, log}` if present.
-4. **Prediction ranges (if present):** sequence IDs must exactly match those in `sequences`; each value is a 2-element list of integers, non-negative, `start ≤ end`.
+4. **Prediction ranges (if present):** sequence IDs must exactly match those in `sequences`; each value is either an empty list `[]` (use the whole sequence) or a 2-element list of integers, non-negative, `start < end`.
 5. **Flanks (if present):** `upstream_seq` / `downstream_seq` must be single strings.
 
 > These are the *generic* GAME checks. They intentionally allow request types (e.g. `expression_*`) this predictor does not serve — narrowing to what ChromBPNet supports happens in the model-specific layer below.
@@ -189,7 +196,7 @@ Runs after validation and produces the final sequence dict handed to the model:
 
 1. **Flanking.** If `upstream_seq` / `downstream_seq` are present, they are concatenated onto every sequence (`upstream + sequence + downstream`) *before* length-based routing, so flanks count toward the short-vs-long decision.
 2. **Sequence spec check** (`check_seqs_specifications`): no empty sequences; only `A/T/C/G/N` bases (case-insensitive). Offending IDs are reported.
-3. **Range bounds check:** for each non-empty range, both `start` and `end` must be `< len(sequence)` (0-based, `end` inclusive). Out-of-bounds ranges raise a `PredictionFailedError` naming the maximum valid index.
+3. **Range bounds check:** for each non-empty range, `start < len(sequence)` and `end <= len(sequence)` (0-based, half-open, checked after flanks are added). Out-of-bounds ranges raise a `PredictionFailedError` stating the valid bounds.
 
 > Range *format* validation (types, ordering, non-negativity) lives in `validate_request_payload`; range *bounds* validation lives here because bounds can only be checked once flanks have been applied.
 
@@ -198,6 +205,6 @@ Runs after validation and produces the final sequence dict handed to the model:
 Called per task after predictions return from `predict_chrombpnet` (which always yields linear values):
 
 - **`linear` (or unset):** returned unchanged; effective scale `"linear"`.
-- **`log`:** `np.log(np.clip(arr, 1e-10, None))` — the epsilon clip prevents `log(0) = -inf`; residual non-finite values are caught downstream by `_sanitize_for_json`.
+- **`log`:** `np.log(np.clip(arr, 1e-10, None))` — the epsilon clip prevents `log(0) = -inf`. Non-finite values have already been replaced by `_sanitize_for_json`, which the server runs *before* `apply_scaling` (see *Output sanitization*), so the clip is the only guard needed on the log path.
 
 Returns `(transformed_predictions, effective_scale)`; the effective scale is echoed back as `scale_prediction_actual`.

@@ -32,17 +32,18 @@ GAME-ChromBPNet-predictor/
     ├── predictor_content_handler.py      # JSON / MessagePack decode + encode (content negotiation)
     ├── predictor_help_message.json       # metadata served at /help
     ├── chrombpnet_predictor.def          # Apptainer build definition
-    ├── dev_run.sh                        # bind-mount dev runner (no rebuild needed)
     ├── setup.py / requirements.txt       # editable install of the vendored chrombpnet package
     │
     ├── README.md                         # predictor internals (inference core + validation)
     ├── chrombpnet/                        
     │   └── README.md                     # vendored upstream Kundaje Lab library
     └── models/
-        └── README.md                     # no-bias fold weights + cell-type→model mapping
+        ├── README.md                     # no-bias fold weights + cell-type→model mapping
+        ├── model_mappings.txt            # Cell Line → ENCID → Assay
+        └── models_nobias/                # fold .h5 weights (not in git; add before building)
 ```
 
-> Start with [`ChromBPNet_GAME/`](ChromBPNet_GAME/README.md) for the core inference and validation logic, [`ChromBPNet_GAME/models/`](ChromBPNet_GAME/models/README.md) for the model set, and [`ChromBPNet_GAME/chrombpnet/`](ChromBPNet_GAME/chrombpnet/README.md) for the model interal library.
+> Start with [`ChromBPNet_GAME/`](ChromBPNet_GAME/README.md) for the core inference and validation logic, [`ChromBPNet_GAME/models/`](ChromBPNet_GAME/models/README.md) for the model set, and [`ChromBPNet_GAME/chrombpnet/`](ChromBPNet_GAME/chrombpnet/README.md) for the model internal library.
 
 ---
 
@@ -62,7 +63,17 @@ Predictions are averaged across **5 cross-validation folds** per model. Models a
 - **Supported species:** `homo_sapiens`
 - **Input window:** 2114 bp · **Prediction window:** 1000 bp · **Resolution:** 1 bp (`bin_size: 1`)
 
-**Cross-assay pooling.** Model selection returns *all* rows matching a requested cell line. For every cell line except H1, that means both the DNASE and ATAC fold sets are pulled and averaged together into a single mean (10 fold-models total). The response then reports `type_actual: ["DNASE", "ATAC"]` and includes an `aggregation: {"models": "mean"}` field. Requesting H1 pulls only its 5 DNASE folds, so no aggregation field is emitted. See [`ChromBPNet_GAME/models/`](ChromBPNet_GAME/models/README.md) and [`ChromBPNet_GAME/`](ChromBPNet_GAME/README.md) for the mechanics.
+**Cross-assay pooling.** Model selection returns *all* rows matching a requested cell line. For every cell line except H1, that means both the DNASE and ATAC fold sets are pulled and averaged together into a single mean (10 fold-models total). The response then reports `type_actual: ["dnase", "atac"]`. Requesting H1 pulls only its 5 DNASE folds (`type_actual: ["dnase"]`).
+
+**Aggregation.** Every successful task carries an `aggregation` object describing how its values were combined:
+
+| Key | When present | Meaning |
+|-----|--------------|---------|
+| `models: "mean"` | always | averaged across the 5 cross-validation folds |
+| `tracks: "mean"` | cell lines with both assays (all except H1) | DNASE and ATAC predictions averaged together |
+| `bins: "mean"` | `point` readout | the point value is the mean of the bp-level profile (over the prediction range, if given) |
+
+See [`ChromBPNet_GAME/models/`](ChromBPNet_GAME/models/README.md) and [`ChromBPNet_GAME/`](ChromBPNet_GAME/README.md) for the mechanics.
 
 ---
 
@@ -75,6 +86,8 @@ cd ChromBPNet_GAME
 ```
 
 ### Build the container
+
+The model weights are not included in this repository. Before building, place the fold `.h5` files in `ChromBPNet_GAME/models/models_nobias/`, named `model.chrombpnet_nobias.fold_{0-4}.{ENCID}.h5` for each ENCID in `models/model_mappings.txt`.
 
 ```bash
 apptainer build chrombpnet_predictor.sif chrombpnet_predictor.def
@@ -95,7 +108,7 @@ apptainer run --nv --containall chrombpnet_predictor.sif <HOST> <PORT> <MATCHER_
 | `MATCHER_IP` | IP of the running Matcher service |
 | `MATCHER_PORT` | Port of the running Matcher service |
 
-All four arguments are required — ChromBPNet always needs a reachable Matcher to resolve cell types it doesn't host directly.
+All four arguments are required. The Matcher is only contacted when a requested cell type has no exact match in the bundled models, so if every request names a hosted cell line (K562, GM12878, HEPG2, IMR90, H1) you can run without a Matcher by passing a placeholder (e.g. `127.0.0.1 1`).
 
 ---
 
@@ -115,9 +128,9 @@ Request and response bodies may be `application/json` or `application/msgpack`. 
 
 When a `/predict` task names a `cell_type`:
 
-1. **Exact match first.** The requested cell type is matched (case-insensitively) against the `Cell Line` column of `models/model_mappings.txt`. On a hit, those models are used directly and `matcher_version` is reported as `"N/A"`.
+1. **Exact match first.** The requested cell type is matched (case-insensitively) against the `Cell Line` column of `models/model_mappings.txt`. On a hit, those models are used directly and `matcher_version` is omitted from the response.
 2. **Matcher fallback.** With no exact match, the predictor POSTs to `http://<MATCHER_IP>:<MATCHER_PORT>/match` with the requested cell type and the list of cell lines it hosts. Matcher returns a `cell_type_actual` (the closest available cell line) and a `matcher_version`.
-3. **Resolution.** The returned `cell_type_actual` is looked up in the mapping table and its models are used. The response surfaces both the requested and actual cell type (`cell_type_requested` vs `cell_type_actual`) plus the `matcher_version`.
-4. **No match.** If Matcher returns `NULL` / no usable cell type, the task fails with a request error rather than guessing.
+3. **Resolution.** The returned `cell_type_actual` is looked up in the mapping table and its models are used. The response surfaces both the requested and actual cell type (`cell_type_requested` vs `cell_type_actual`) plus the top-level `matcher_version` (`null` if the Matcher did not report one).
+4. **No match.** If Matcher returns no usable cell type (empty, or a cell line this predictor does not host), that task is returned as a failed task (`prediction_request_failed`) rather than guessing; other tasks are unaffected.
 
-Matcher connectivity failures are caught and surfaced as a structured error instead of crashing the request. The exact selection logic lives in `choose_model()` — see [`ChromBPNet_GAME/`](ChromBPNet_GAME/README.md).
+The exact selection logic and Matcher error handling live in `choose_model()` — see [`ChromBPNet_GAME/`](ChromBPNet_GAME/README.md).

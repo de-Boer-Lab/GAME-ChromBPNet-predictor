@@ -61,7 +61,7 @@ Nine models across five cell lines and two assays. **H1 is DNASE-only**; the oth
 - **Exact match** → those rows are used directly.
 - **No exact match** → the Matcher service is queried with the requested cell type and the list of available cell lines; the returned `cell_type_actual` is then looked up here.
 
-Because *all* rows for a cell line are returned, requesting a cell line with both assays selects both model sets. Their folds are pooled — **5 folds × 2 assays = 10 fold-models averaged into one mean track** — and the task reports `type_actual: ["DNASE", "ATAC"]` with `aggregation: {"models": "mean"}`. Requesting H1 selects only its 5 DNASE folds, giving a 5-fold mean and no aggregation field.
+Because *all* rows for a cell line are returned, requesting a cell line with both assays selects both model sets. Their folds are pooled — **5 folds × 2 assays = 10 fold-models averaged into one mean track** — and the task reports `type_actual: ["dnase", "atac"]` with `aggregation: {"tracks": "mean", "models": "mean"}`. Requesting H1 selects only its 5 DNASE folds, giving a 5-fold mean: `type_actual: ["dnase"]`, `aggregation: {"models": "mean"}`. (Point readouts also add `"bins": "mean"`.)
 
 ---
 
